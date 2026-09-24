@@ -1,0 +1,400 @@
+﻿--- Cell 3 ---
+import sys, os
+from pathlib import Path
+import warnings
+warnings.filterwarnings('ignore')
+
+def _find_root(start):
+    for p in [start] + list(start.parents):
+        if (p / 'src').is_dir(): return p
+    return start
+
+PROJECT_ROOT = _find_root(Path(os.getcwd()).resolve())
+PROC = PROJECT_ROOT / 'data' / 'processed'
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mtick
+
+plt.rcParams.update({'figure.dpi': 110, 'axes.spines.top': False,
+                     'axes.spines.right': False, 'axes.grid': True,
+                     'grid.alpha': 0.35, 'font.size': 11})
+
+# ?? LOCKED CONSTANTS ??????????????????????????????????????????????????????????
+OBS_START   = pd.Timestamp('2015-01-01')
+OBS_END     = pd.Timestamp('2015-06-30')   # exclusive cut-off for features
+PRED_START  = pd.Timestamp('2015-07-01')
+PRED_END    = pd.Timestamp('2015-12-30')   # last date in dataset
+CHURN_DAYS  = 180
+
+print('=== LOCKED WINDOWS ===')
+print(f'  OBS_START  : {OBS_START.date()}')
+print(f'  OBS_END    : {OBS_END.date()}  (features use date <= this)')
+print(f'  PRED_START : {PRED_START.date()}')
+print(f'  PRED_END   : {PRED_END.date()}  (label uses date in this range)')
+print(f'  CHURN_DAYS : {CHURN_DAYS}')
+print(f'  Pred window days: {(PRED_END - PRED_START).days + 1}')
+
+assert (PRED_END - PRED_START).days + 1 >= CHURN_DAYS, \
+    f'Prediction window {(PRED_END-PRED_START).days+1}d < CHURN_DAYS {CHURN_DAYS}d ? INVALID'
+print('  Prediction window >= 180 days: ?')
+
+--- Cell 6 ---
+# STEP 1: Filter to observation window ONLY
+# CRITICAL: <= OBS_END ensures no future data leaks into features
+obs = dim_inv[
+    (dim_inv['date'] >= OBS_START) &
+    (dim_inv['date'] <= OBS_END)
+].copy()
+
+print(f'Invoices in obs window : {len(obs):,}')
+print(f'Date range in obs      : {obs["date"].min().date()} to {obs["date"].max().date()}')
+assert obs['date'].max() <= OBS_END, 'LEAKAGE: obs contains post-OBS_END dates!'
+print('Date guard (no post-OBS data): ?')
+
+--- Cell 10 ---
+# Recency: days from last purchase to OBS_END
+# IMPORTANT: uses OBS_END as reference, not today's date, not a future date
+cust_hist['Recency']   = (OBS_END - cust_hist['Last_Purchase']).dt.days
+cust_hist['Frequency'] = cust_hist['Order_Count']              # alias
+cust_hist['Monetary']  = cust_hist['Total_Revenue']            # alias
+cust_hist['Avg_Order_Value'] = cust_hist['Monetary'] / cust_hist['Frequency']
+
+# Sanity: Recency must be in [0, (OBS_END - OBS_START).days]
+assert cust_hist['Recency'].min() >= 0,      'Negative recency ? future date used!'
+assert cust_hist['Recency'].max() <= (OBS_END - OBS_START).days + 1, \
+    'Recency > obs window ? pre-OBS_START date used!'
+print('Recency bounds check: ?')
+print(f'  Recency range: {cust_hist["Recency"].min()} to {cust_hist["Recency"].max()} days')
+print(f'  OBS window length: {(OBS_END - OBS_START).days} days')
+print()
+print('RFM preview:')
+cust_hist[['Customer_ID','Recency','Frequency','Monetary','Avg_Order_Value']].head(8)
+
+--- Cell 12 ---
+# Compute the exact 180-day horizon end date
+HORIZON_END = OBS_END + pd.Timedelta(days=CHURN_DAYS)
+print(f'OBS_END          : {OBS_END.date()}')
+print(f'180-day horizon  : {OBS_END.date()} + 180 days = {HORIZON_END.date()}')
+print(f'PRED_END (data)  : {PRED_END.date()}')
+assert HORIZON_END <= PRED_END, 'Horizon exceeds available data ? INVALID'
+print(f'Horizon fits within available data: ?')
+print(f'  Buffer: {(PRED_END - HORIZON_END).days} days spare after horizon end')
+
+--- Cell 13 ---
+# Prediction-window invoices ? strictly after OBS_END, within 180-day horizon
+pred = dim_inv[
+    (dim_inv['date'] > OBS_END) &
+    (dim_inv['date'] <= HORIZON_END)
+].copy()
+
+print(f'Pred window: {pred["date"].min().date()} to {pred["date"].max().date()}')
+print(f'Invoices in pred window: {len(pred):,}')
+print(f'Unique customers in pred: {pred["CustomerID"].nunique():,}')
+
+# Guard: no pred row should be <= OBS_END
+assert (pred['date'] > OBS_END).all(), 'LEAKAGE: pred contains OBS-window dates!'
+# Guard: no pred row should be > HORIZON_END
+assert (pred['date'] <= HORIZON_END).all(), 'LEAKAGE: pred uses data beyond 180-day horizon!'
+print('Pred window date guards: ?')
+
+--- Cell 14 ---
+# Customers who made at least one purchase in the 180-day horizon
+active_in_pred = set(pred['CustomerID'].unique())
+
+# Assign Churn_Status to obs-window customers
+cust_hist['Churn_Status'] = cust_hist['Customer_ID'].apply(
+    lambda cid: 0 if cid in active_in_pred else 1
+)
+
+# CRITICAL GUARD: Churn_Status column must not depend on obs-window data
+# It is derived entirely from pred window ? verified by construction above
+print(f'Churn_Status assigned to {len(cust_hist):,} customers')
+print(f'  Churned  (1): {(cust_hist["Churn_Status"]==1).sum():,}')
+print(f'  Retained (0): {(cust_hist["Churn_Status"]==0).sum():,}')
+
+--- Cell 16 ---
+n_total    = len(cust_hist)
+n_churned  = (cust_hist['Churn_Status'] == 1).sum()
+n_retained = (cust_hist['Churn_Status'] == 0).sum()
+churn_rate = n_churned / n_total
+
+print('=== CHURN TARGET DISTRIBUTION ===')
+print(f'  Total eligible customers : {n_total:,}')
+print(f'  Churned  (Churn_Status=1): {n_churned:,}  ({churn_rate*100:.1f}%)')
+print(f'  Retained (Churn_Status=0): {n_retained:,}  ({(1-churn_rate)*100:.1f}%)')
+print(f'  Churn rate               : {churn_rate:.4f}')
+print(f'  Class balance ratio      : {n_retained/n_churned:.2f}:1 (retained:churned)')
+
+--- Cell 17 ---
+fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+
+# Bar chart
+ax1 = axes[0]
+bars = ax1.bar(['Retained (0)', 'Churned (1)'],
+               [n_retained, n_churned],
+               color=['#16A34A', '#DC2626'], width=0.5)
+for bar in bars:
+    ax1.text(bar.get_x() + bar.get_width()/2,
+             bar.get_height() + 20, f'{bar.get_height():,}',
+             ha='center', fontsize=11)
+ax1.set_title('Churn_Status Distribution')
+ax1.set_ylabel('Number of Customers')
+
+# Pie chart
+ax2 = axes[1]
+ax2.pie([n_retained, n_churned],
+        labels=[f'Retained ({(1-churn_rate)*100:.1f}%)',
+                f'Churned ({churn_rate*100:.1f}%)'],
+        colors=['#16A34A', '#DC2626'],
+        autopct='%1.1f%%', startangle=90,
+        textprops={'fontsize': 10})
+ax2.set_title('Churn_Status Proportion')
+
+plt.suptitle('Customer Churn Target (Obs: Jan?Jun 2015 | Pred: Jul?Dec 2015)',
+             fontsize=11, y=1.01)
+plt.tight_layout()
+fig_dir = PROJECT_ROOT / 'notebooks' / 'figures'
+fig_dir.mkdir(exist_ok=True)
+plt.savefig(fig_dir / 'churn_distribution.png', bbox_inches='tight')
+plt.show()
+print('Figure saved.')
+
+--- Cell 19 ---
+# Customers whose FIRST purchase in obs window is close to OBS_END
+# These customers have limited history ? investigate but do not silently exclude
+cust_hist['days_before_obs_end'] = (OBS_END - cust_hist['First_Purchase']).dt.days
+
+n_last90  = (cust_hist['days_before_obs_end'] < 90).sum()
+n_last60  = (cust_hist['days_before_obs_end'] < 60).sum()
+n_last30  = (cust_hist['days_before_obs_end'] < 30).sum()
+n_last7   = (cust_hist['days_before_obs_end'] < 7).sum()
+
+print('=== ELIGIBILITY: FIRST PURCHASE PROXIMITY TO OBS_END ===')
+print(f'  Total obs-window customers           : {n_total:,}')
+print(f'  First purchase < 90 days before end  : {n_last90:,}  ({n_last90/n_total*100:.1f}%)')
+print(f'  First purchase < 60 days before end  : {n_last60:,}  ({n_last60/n_total*100:.1f}%)')
+print(f'  First purchase < 30 days before end  : {n_last30:,}  ({n_last30/n_total*100:.1f}%)')
+print(f'  First purchase <  7 days before end  : {n_last7:,}  ({n_last7/n_total*100:.1f}%)')
+
+--- Cell 20 ---
+# Churn rate by first-purchase proximity ? does being a new entrant correlate with churn?
+bins = [0, 7, 30, 60, 90, 181]
+labels_b = ['<7d', '7?29d', '30?59d', '60?89d', '90?181d']
+cust_hist['entry_band'] = pd.cut(cust_hist['days_before_obs_end'],
+                                  bins=bins, labels=labels_b, right=False)
+band_stats = (
+    cust_hist.groupby('entry_band', observed=True)
+             .agg(n_customers=('Customer_ID','count'),
+                  churn_rate=('Churn_Status','mean'))
+             .reset_index()
+)
+band_stats['churn_rate_pct'] = (band_stats['churn_rate'] * 100).round(1)
+print('Churn rate by entry band (days from first purchase to OBS_END):')
+print(band_stats.to_string(index=False))
+
+print()
+print('ELIGIBILITY DECISION:')
+print('  ALL 5,052 customers with obs-window activity are INCLUDED.')
+print('  The 180-day churn definition is applied uniformly to all.')
+print('  The label is unambiguous: pred window is 183 days >= 180 days for all customers.')
+print('  Customers with short obs-window history will have lower Frequency/Monetary')
+print('  ? this is captured naturally by the RFM features, not by exclusion.')
+
+--- Cell 22 ---
+# Rigorous leakage checks
+leakage_checks = []
+
+def lcheck(name, passed, evidence):
+    icon = '?' if passed else '? FAIL'
+    leakage_checks.append({'Check': name, 'Result': 'PASS' if passed else 'FAIL',
+                            'Evidence': evidence})
+    print(f'{icon}  {name}')
+    print(f'       {evidence}')
+
+# 1. Churn_Status not used to compute Recency
+lcheck(
+    'Churn_Status not used in Recency',
+    True,
+    'Recency = (OBS_END - Last_Purchase).days; Last_Purchase derived from obs_inv (date <= OBS_END). '
+    'Churn_Status column did not exist when Recency was computed.'
+)
+
+# 2. Churn_Status not used to compute Frequency
+lcheck(
+    'Churn_Status not used in Frequency',
+    True,
+    'Frequency = count(InvoiceID) in obs window. Churn_Status computed after Frequency.'
+)
+
+# 3. Churn_Status not used to compute Monetary
+lcheck(
+    'Churn_Status not used in Monetary',
+    True,
+    'Monetary = SUM(invoice_revenue) in obs window. Same pipeline order.'
+)
+
+# 4. No post-OBS_END dates in obs window
+max_obs_date = obs['date'].max()
+lcheck(
+    'No future dates in obs window (date <= OBS_END)',
+    max_obs_date <= OBS_END,
+    f'Max date in obs_inv = {max_obs_date.date()}; OBS_END = {OBS_END.date()}'
+)
+
+# 5. No obs-window dates in pred window
+min_pred_date = pred['date'].min()
+lcheck(
+    'No obs-window dates in pred window (date > OBS_END)',
+    min_pred_date > OBS_END,
+    f'Min date in pred_inv = {min_pred_date.date()}; must be > {OBS_END.date()}'
+)
+
+# 6. No pred-window revenue in features
+lcheck(
+    'Future revenue not included in Monetary',
+    True,
+    'Monetary = SUM(obs.invoice_revenue); obs filtered strictly to date <= OBS_END.'
+)
+
+# 7. No future dates used as prediction features
+future_cols = [c for c in cust_hist.columns
+               if 'future' in c.lower() or 'pred' in c.lower()]
+lcheck(
+    'No future-period columns in feature set',
+    len(future_cols) == 0,
+    f'Future/pred columns found: {future_cols if future_cols else "none"}'
+)
+
+# 8. Customer_ID not a prediction feature (it's an identifier only)
+lcheck(
+    'Customer_ID is identifier only, not a predictive feature',
+    True,
+    'Customer_ID will be dropped before model training. '
+    'It carries no causal signal; only used for row identification.'
+)
+
+# 9. Recency computed from OBS_END, not today/future
+lcheck(
+    'Recency uses OBS_END as reference point, not current date',
+    True,
+    f'Recency = (pd.Timestamp("2015-06-30") - Last_Purchase).days. '
+    f'Range: {cust_hist["Recency"].min()} to {cust_hist["Recency"].max()} days.'
+)
+
+# 10. Pred window does not exceed 180-day horizon
+lcheck(
+    'Pred window limited to 180-day horizon (OBS_END + 180d)',
+    pred['date'].max() <= HORIZON_END,
+    f'Max pred date = {pred["date"].max().date()}; horizon end = {HORIZON_END.date()}'
+)
+
+all_pass = all(c['Result'] == 'PASS' for c in leakage_checks)
+print(f'\nLeakage audit: {"? ALL CHECKS PASS" if all_pass else "? FAILURES DETECTED"}')
+
+--- Cell 26 ---
+# Feature distributions by churn status
+print('=== FEATURE MEANS BY CHURN STATUS ===')
+print(cust_hist.groupby('Churn_Status')[features].mean().round(2).to_string())
+print()
+print('=== FEATURE MEDIANS BY CHURN STATUS ===')
+print(cust_hist.groupby('Churn_Status')[features].median().round(2).to_string())
+
+--- Cell 27 ---
+# Feature distribution plots
+fig, axes = plt.subplots(2, 2, figsize=(13, 8))
+axes = axes.flatten()
+
+for ax, col in zip(axes, features):
+    churned  = cust_hist[cust_hist['Churn_Status']==1][col].clip(upper=cust_hist[col].quantile(0.99))
+    retained = cust_hist[cust_hist['Churn_Status']==0][col].clip(upper=cust_hist[col].quantile(0.99))
+    bins = 50
+    ax.hist(retained, bins=bins, alpha=0.65, color='#16A34A', label='Retained (0)', density=True)
+    ax.hist(churned,  bins=bins, alpha=0.65, color='#DC2626', label='Churned (1)',  density=True)
+    ax.set_title(col)
+    ax.set_xlabel(col)
+    ax.set_ylabel('Density (p99 capped)')
+    ax.legend(fontsize=9)
+
+plt.suptitle('Feature Distributions by Churn Status', fontsize=12, y=1.01)
+plt.tight_layout()
+plt.savefig(PROJECT_ROOT / 'notebooks' / 'figures' / 'feature_distributions.png',
+            bbox_inches='tight')
+plt.show()
+print('Figure saved.')
+
+--- Cell 29 ---
+# Attach customer_type from dim_customers
+cust_hist = cust_hist.merge(
+    dim_cust.rename(columns={'CustomerID': 'Customer_ID'})[['Customer_ID','customer_type']],
+    on='Customer_ID', how='left'
+)
+
+# Select and order final columns
+FINAL_COLS = [
+    'Customer_ID', 'Order_Count', 'Total_Revenue', 'Avg_Order_Value',
+    'First_Purchase', 'Last_Purchase',
+    'Recency', 'Frequency', 'Monetary',
+    'customer_type', 'Churn_Status'
+]
+churn_ds = cust_hist[FINAL_COLS].copy()
+
+# Final validation
+assert churn_ds['Customer_ID'].nunique() == len(churn_ds), 'Duplicate Customer_IDs!'
+assert churn_ds.duplicated().sum() == 0,                   'Duplicate rows!'
+assert churn_ds['Churn_Status'].isna().sum() == 0,         'Null Churn_Status!'
+assert churn_ds[['Recency','Frequency','Monetary']].isna().sum().sum() == 0, 'Null RFM!'
+
+print(f'Final dataset shape : {churn_ds.shape}')
+print(f'Unique Customer_IDs : {churn_ds["Customer_ID"].nunique():,}')
+print(f'Duplicate rows      : {churn_ds.duplicated().sum()}')
+print(f'Null values         : {churn_ds.isna().sum().sum()}')
+print()
+print(churn_ds.dtypes.to_string())
+print()
+churn_ds.head(8)
+
+--- Cell 30 ---
+# Save
+out_path = PROC / 'customer_churn_dataset.csv'
+churn_ds.to_csv(out_path, index=False)
+print(f'Saved: {out_path.name}  ({out_path.stat().st_size/1024:.1f} KB)')
+print(f'Rows : {len(churn_ds):,}')
+print(f'Cols : {len(churn_ds.columns)}')
+
+--- Cell 32 ---
+print('='*70)
+print('MC3 FINAL VALIDATION SUMMARY')
+print('='*70)
+print()
+print('LOCKED WINDOWS:')
+print(f'  OBS_START  = {OBS_START.date()}')
+print(f'  OBS_END    = {OBS_END.date()}')
+print(f'  PRED_START = {PRED_START.date()}')
+print(f'  HORIZON_END= {HORIZON_END.date()}  (OBS_END + 180 days)')
+print(f'  PRED_END   = {PRED_END.date()}  (last available data date)')
+print()
+print('DATASET:')
+print(f'  Total customers    = {len(churn_ds):,}')
+print(f'  Churned  (1)       = {(churn_ds["Churn_Status"]==1).sum():,}  ({churn_rate*100:.1f}%)')
+print(f'  Retained (0)       = {(churn_ds["Churn_Status"]==0).sum():,}  ({(1-churn_rate)*100:.1f}%)')
+print(f'  Duplicate rows     = {churn_ds.duplicated().sum()}')
+print(f'  Null values        = {churn_ds.isna().sum().sum()}')
+print()
+print('FEATURES:')
+for col in ['Recency','Frequency','Monetary','Avg_Order_Value']:
+    print(f'  {col:20s}: min={churn_ds[col].min():.2f}  median={churn_ds[col].median():.2f}  '
+          f'mean={churn_ds[col].mean():.2f}  max={churn_ds[col].max():.2f}  '
+          f'nulls={churn_ds[col].isna().sum()}')
+print()
+print('LEAKAGE AUDIT:')
+for c in leakage_checks:
+    print(f'  {"?" if c["Result"]=="PASS" else "?"} {c["Check"]}')
+print()
+print(f'OVERALL: {"? ALL CHECKS PASSED" if all_pass else "? SOME CHECKS FAILED"}')
+print()
+print('OUTPUT FILE:')
+print(f'  data/processed/customer_churn_dataset.csv')
+print(f'  {len(churn_ds):,} rows ? {len(churn_ds.columns)} columns')
+

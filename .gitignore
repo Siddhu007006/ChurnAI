@@ -1,0 +1,29 @@
+# Data files
+data/
+customer-churn-analytics/data/
+
+# Model binaries
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db

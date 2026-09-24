@@ -1,0 +1,121 @@
+{
+  "dim_invoices": {
+    "rows": 33499,
+    "unique_InvoiceID": 33499,
+    "unique_CustomerID": 8237
+  },
+  "fact_invoice_items": {
+    "rows": 431263,
+    "unique_InvoiceID": 33499,
+    "unique_product_id": 4033
+  },
+  "dim_customers": {
+    "rows": 8237
+  },
+  "dim_products": {
+    "rows": 4033
+  },
+  "revenue": {
+    "invoice_items_direct": 9307314.4,
+    "dim_invoices_agg": 9307314.4,
+    "difference": 0.0
+  },
+  "checks": [
+    {
+      "check": "A1 dim_invoices InvoiceID unique",
+      "passed": true,
+      "detail": "unique=33499  rows=33499"
+    },
+    {
+      "check": "A2 dim_invoices CustomerID not null",
+      "passed": "True",
+      "detail": "nulls=0"
+    },
+    {
+      "check": "A3 dim_invoices date not null",
+      "passed": "True",
+      "detail": "nulls=0"
+    },
+    {
+      "check": "A4 dim_invoices 1 customer per invoice",
+      "passed": "True",
+      "detail": "max customers per invoice = 1"
+    },
+    {
+      "check": "A5 dim_invoices 1 date per invoice",
+      "passed": "True",
+      "detail": "max dates per invoice = 1"
+    },
+    {
+      "check": "B1 fact_ii no exact duplicates",
+      "passed": "True",
+      "detail": "dups=0"
+    },
+    {
+      "check": "B2 fact_ii InvoiceID not null",
+      "passed": "True",
+      "detail": "nulls=0"
+    },
+    {
+      "check": "B3 fact_ii product_id not null",
+      "passed": "True",
+      "detail": "nulls=0"
+    },
+    {
+      "check": "B4 fact_ii quantity >= 0",
+      "passed": "True",
+      "detail": "negative_qty=0"
+    },
+    {
+      "check": "B5 fact_ii price >= 0",
+      "passed": "True",
+      "detail": "negative_price=0"
+    },
+    {
+      "check": "B6 fact_ii line_total >= 0",
+      "passed": "True",
+      "detail": "negative_line_total=0"
+    },
+    {
+      "check": "C1 all dim_invoices IDs exist in fact_ii",
+      "passed": true,
+      "detail": "orphans_in_dim=0"
+    },
+    {
+      "check": "C2 all fact_ii IDs exist in dim_invoices",
+      "passed": true,
+      "detail": "orphans_in_fact=0"
+    },
+    {
+      "check": "C3 dim_invoices.CustomerID in dim_customers",
+      "passed": true,
+      "detail": "orphans=0"
+    },
+    {
+      "check": "C4 fact_ii.product_id in dim_products",
+      "passed": true,
+      "detail": "orphans=0"
+    },
+    {
+      "check": "D1 revenue dim_invoices == direct from ii",
+      "passed": "True",
+      "detail": "dim=\u00a39,307,314.40  direct=\u00a39,307,314.40  diff=\u00a30.0000"
+    },
+    {
+      "check": "D2 revenue fact_ii == direct from ii",
+      "passed": "True",
+      "detail": "fact=\u00a39,307,314.40  direct=\u00a39,307,314.40  diff=\u00a30.0000"
+    },
+    {
+      "check": "E1 invoice count fact_ii == dim_invoices",
+      "passed": true,
+      "detail": "fact_ii unique=33499  dim_invoices rows=33499"
+    },
+    {
+      "check": "F1 all invoice customers in dim_customers",
+      "passed": true,
+      "detail": "inv_customers=8237  dim_customers=8237"
+    }
+  ],
+  "all_passed": true
+}
